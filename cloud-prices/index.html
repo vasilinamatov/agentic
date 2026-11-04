@@ -66,7 +66,7 @@
   <header>
     <div class="eyebrow">Infrastructure / Compute</div>
     <h1>Cloud compute pricebook</h1>
-    <p>Comparable Linux virtual machines, on-demand, across AWS, Azure, and Google Cloud.</p>
+    <p>Comparable Linux virtual machines, on-demand, across AWS, Azure, and Google Cloud when pricing is available.</p>
   </header>
   <main>
     <section class="controls" aria-label="Pricing controls">
@@ -94,7 +94,7 @@
         <tbody id="rows"></tbody>
       </table>
     </div>
-    <p class="note"><strong>Preview only; these values are not live.</strong> Run <code>generate-pricing.ps1</code> to fetch current public rates from AWS, Azure, and Google Cloud. The generated rates are public on-demand list prices, not negotiated quotes, and exclude commitments, storage, networking, taxes, and support.</p>
+    <p class="note"><strong>Preview only; these values are not live.</strong> Run <code>generate-pricing.ps1</code> to fetch current public rates. Google Cloud pricing is optional and is omitted when its API key is missing or its catalog is unavailable. The generated rates are public on-demand list prices, not negotiated quotes, and exclude commitments, storage, networking, taxes, and support.</p>
     <footer>
       <span>Preview data only · The generator replaces this page with fetched provider prices.</span>
       <span><a href="https://aws.amazon.com/ec2/pricing/on-demand/">AWS pricing</a> · <a href="https://azure.microsoft.com/pricing/details/virtual-machines/linux/">Azure pricing</a> · <a href="https://cloud.google.com/compute/all-pricing">Google Cloud pricing</a></span>
@@ -122,6 +122,14 @@
       hours.value = monthlyHours;
       document.getElementById('hours-label').textContent = monthlyHours;
       const visible = pricing.filter(item => selectedSize === 'all' || item.vcpu === Number(selectedSize));
+      if (visible.length === 0) {
+        rows.innerHTML = '<tr><td colspan="7">No prices are available for this size.</td></tr>';
+        document.getElementById('lowest-hourly').textContent = '-';
+        document.getElementById('lowest-hourly-cloud').textContent = '';
+        document.getElementById('lowest-monthly').textContent = '-';
+        document.getElementById('lowest-monthly-cloud').textContent = '';
+        return;
+      }
       const minRate = Math.min(...visible.map(item => item.rate));
       rows.innerHTML = visible.map(item => {
         const best = item.rate === minRate;

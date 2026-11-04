@@ -29,9 +29,10 @@ function Get-AwsRates {
 
     $rates = @{}
     foreach ($instanceType in $InstanceTypes) {
-            $row = $rows | Where-Object { $_.'Instance Type' -eq $instanceType } | Select-Object -First 1
+      $row = $rows | Where-Object { $_.'Instance Type' -eq $instanceType } | Select-Object -First 1
       if ($null -eq $row) {
-        throw "AWS price list has no Linux shared on-demand entry for $instanceType in us-east-1."
+        Write-Warning "AWS price list has no Linux shared on-demand entry for $instanceType in us-east-1; skipping this size."
+        continue
       }
       $rates[$instanceType] = [double]::Parse($row.PricePerUnit, [System.Globalization.CultureInfo]::InvariantCulture)
     }
@@ -127,29 +128,59 @@ function Get-GoogleN2Rates {
   }
 }
 
-$googleApiKey = $env:GOOGLE_CLOUD_API_KEY
-if ([string]::IsNullOrWhiteSpace($googleApiKey)) {
-  throw 'Set GOOGLE_CLOUD_API_KEY (or the matching GitHub Actions secret) to query Google Cloud prices.'
+$awsInstanceTypes = @('m7i.large', 'm7i.xlarge', 'm7i.2xlarge')
+$awsRates = @{}
+try {
+  $awsRates = Get-AwsRates -InstanceTypes $awsInstanceTypes
+}
+catch {
+  Write-Warning "AWS prices are unavailable and will be omitted: $($_.Exception.Message)"
 }
 
-$awsInstanceTypes = @('m7i.large', 'm7i.xlarge', 'm7i.2xlarge')
-$awsRates = Get-AwsRates -InstanceTypes $awsInstanceTypes
-$googleRates = Get-GoogleN2Rates -ApiKey $googleApiKey
+$googleRates = $null
+$googleApiKey = $env:GOOGLE_CLOUD_API_KEY
+if ([string]::IsNullOrWhiteSpace($googleApiKey)) {
+  Write-Warning 'GOOGLE_CLOUD_API_KEY is not set; Google Cloud prices will be omitted.'
+}
+else {
+  try {
+    $googleRates = Get-GoogleN2Rates -ApiKey $googleApiKey
+  }
+  catch {
+    Write-Warning "Google Cloud prices are unavailable and will be omitted: $($_.Exception.Message)"
+  }
+}
+
 $sizes = @(
   @{ vcpu = 2; memory = 8; aws = 'm7i.large'; azure = 'D2s v5'; azureArm = 'Standard_D2s_v5'; google = 'n2-standard-2' }
   @{ vcpu = 4; memory = 16; aws = 'm7i.xlarge'; azure = 'D4s v5'; azureArm = 'Standard_D4s_v5'; google = 'n2-standard-4' }
   @{ vcpu = 8; memory = 32; aws = 'm7i.2xlarge'; azure = 'D8s v5'; azureArm = 'Standard_D8s_v5'; google = 'n2-standard-8' }
 )
 
-$pricing = foreach ($size in $sizes) {
-  @(
-    @{ cloud = 'AWS'; vm = $size.aws; vcpu = $size.vcpu; memory = $size.memory; rate = $awsRates[$size.aws]; region = 'us-east-1' }
-    @{ cloud = 'Azure'; vm = $size.azure; vcpu = $size.vcpu; memory = $size.memory; rate = (Get-AzureHourlyRate -ArmSkuName $size.azureArm); region = 'East US' }
-    @{ cloud = 'Google Cloud'; vm = $size.google; vcpu = $size.vcpu; memory = $size.memory; rate = (($size.vcpu * $googleRates.core) + ($size.memory * $googleRates.ram)); region = 'us-east1' }
-  )
+$pricing = [System.Collections.Generic.List[object]]::new()
+foreach ($size in $sizes) {
+  if ($awsRates.ContainsKey($size.aws)) {
+    $pricing.Add(@{ cloud = 'AWS'; vm = $size.aws; vcpu = $size.vcpu; memory = $size.memory; rate = $awsRates[$size.aws]; region = 'us-east-1' })
+  }
+
+  try {
+    $azureRate = Get-AzureHourlyRate -ArmSkuName $size.azureArm
+    $pricing.Add(@{ cloud = 'Azure'; vm = $size.azure; vcpu = $size.vcpu; memory = $size.memory; rate = $azureRate; region = 'East US' })
+  }
+  catch {
+    Write-Warning "Azure price for $($size.azure) is unavailable and will be omitted: $($_.Exception.Message)"
+  }
+
+  if ($null -ne $googleRates) {
+    $pricing.Add(@{ cloud = 'Google Cloud'; vm = $size.google; vcpu = $size.vcpu; memory = $size.memory; rate = (($size.vcpu * $googleRates.core) + ($size.memory * $googleRates.ram)); region = 'us-east1' })
+  }
 }
 
-$pricingJson = ConvertTo-Json -InputObject @($pricing) -Depth 4 -Compress
+if ($pricing.Count -eq 0) {
+  throw 'No cloud prices could be retrieved; the pricing page was not generated.'
+}
+
+$pricingJson = ConvertTo-Json -InputObject @($pricing.ToArray()) -Depth 4 -Compress
 $generatedDate = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd HH:mm 'UTC'")
 $html = @'
 <!doctype html>
@@ -272,6 +303,14 @@ $html = @'
       hours.value = monthlyHours;
       document.getElementById('hours-label').textContent = monthlyHours;
       const visible = pricing.filter(item => selectedSize === 'all' || item.vcpu === Number(selectedSize));
+      if (visible.length === 0) {
+        rows.innerHTML = '<tr><td colspan="7">No prices are available for this size.</td></tr>';
+        document.getElementById('lowest-hourly').textContent = '-';
+        document.getElementById('lowest-hourly-cloud').textContent = '';
+        document.getElementById('lowest-monthly').textContent = '-';
+        document.getElementById('lowest-monthly-cloud').textContent = '';
+        return;
+      }
       const minRate = Math.min(...visible.map(item => item.rate));
       rows.innerHTML = visible.map(item => {
         const best = item.rate === minRate;
@@ -300,7 +339,8 @@ $html = @'
 '@
 
 $html = $html.Replace('__PRICING_DATA__', $pricingJson).Replace('__GENERATED_DATE__', $generatedDate)
-Set-Content -Path 'index.html' -Value $html -Encoding utf8
-New-Item -ItemType Directory -Path 'site' -Force | Out-Null
-Set-Content -Path 'site/index.html' -Value $html -Encoding utf8
-Write-Output 'Generated index.html'
+Set-Content -Path (Join-Path $PSScriptRoot 'index.html') -Value $html -Encoding utf8
+$sitePath = Join-Path $PSScriptRoot 'site'
+New-Item -ItemType Directory -Path $sitePath -Force | Out-Null
+Set-Content -Path (Join-Path $sitePath 'index.html') -Value $html -Encoding utf8
+Write-Output "Generated $(Join-Path $PSScriptRoot 'index.html')"

@@ -168,6 +168,7 @@ venv.bak/
 
 # mkdocs/Zensical documentation
 /site
+/cloud-prices/site/
 
 # mypy
 .mypy_cache/
